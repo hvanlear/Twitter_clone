@@ -1,10 +1,10 @@
 import os
 
-from flask import Flask, render_template, request, flash, redirect, session, g
+from flask import Flask, render_template, request, flash, redirect, session, g, abort
 from flask_debugtoolbar import DebugToolbarExtension
 from sqlalchemy.exc import IntegrityError
 
-from forms import UserAddForm, LoginForm, MessageForm
+from forms import UserAddForm, LoginForm, MessageForm, UserEditForm
 from models import db, connect_db, User, Message
 
 CURR_USER_KEY = "curr_user"
@@ -18,7 +18,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = (
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SQLALCHEMY_ECHO'] = False
-app.config['DEBUG_TB_INTERCEPT_REDIRECTS'] = True
+app.config['DEBUG_TB_INTERCEPT_REDIRECTS'] = False
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', "it's a secret")
 toolbar = DebugToolbarExtension(app)
 
@@ -113,7 +113,9 @@ def login():
 def logout():
     """Handle logout of user."""
 
-    # IMPLEMENT THIS
+    do_logout()
+    flash('User Logged Out')
+    return redirect('/login')
 
 
 ##############################################################################
@@ -153,6 +155,17 @@ def users_show(user_id):
     return render_template('users/show.html', user=user, messages=messages)
 
 
+@app.route('/users/<int:user_id>/likes')
+def show_likes(user_id):
+    """show list of liked messages"""
+    if not g.user:
+        flash("Access unauthorized.", "danger")
+        return redirect("/")
+
+    user = user = User.query.get_or_404(user_id)
+    return render_template('/users/likes.html', user=user)
+
+
 @app.route('/users/<int:user_id>/following')
 def show_following(user_id):
     """Show list of people this user is following."""
@@ -162,6 +175,8 @@ def show_following(user_id):
         return redirect("/")
 
     user = User.query.get_or_404(user_id)
+    # import pdb
+    # pdb.set_trace()
     return render_template('users/following.html', user=user)
 
 
@@ -211,7 +226,26 @@ def stop_following(follow_id):
 def profile():
     """Update profile for current user."""
 
-    # IMPLEMENT THIS
+    if not g.user:
+        flash("Access unauthorized.", "danger")
+        return redirect("/")
+
+    user = g.user
+    form = UserEditForm(obj=user)
+
+    if form.validate_on_submit():
+        if User.authenticate(user.username, form.password.data):
+            user.username = form.username.data
+            user.email = form.email.data
+            user.image_url = form.image_url.data or "/static/images/default-pic.png"
+            user.header_image_url = form.header_image_url.data or "/static/images/warbler-hero.jpg"
+            user.bio = form.bio.data
+
+            db.session.commit()
+            return redirect(f'/users/{user.id}')
+
+        flash('Wrong Password', 'danger')
+    return render_template('users/edit.html', form=form, user_id=user.id)
 
 
 @app.route('/users/delete', methods=["POST"])
@@ -264,12 +298,37 @@ def messages_show(message_id):
     return render_template('messages/show.html', message=msg)
 
 
+@app.route('/messages/<int:message_id>/like', methods=["POST"])
+def add_likes(message_id):
+    """Toggle Likes"""
+
+    if not g.user:
+        flash('Access unauthorized', 'danger')
+        return redirect('/')
+
+    liked_message = Message.query.get_or_404(message_id)
+    if liked_message.user_id == g.user.id:
+        return abort(403)
+
+    user_likes = g.user.likes
+
+    if liked_message in user_likes:
+        g.user.likes = [like for like in user_likes if like != liked_message]
+    else:
+        g.user.likes.append(liked_message)
+
+    db.session.commit()
+    # import pdb
+    # pdb.set_trace()
+    return redirect('/')
+
+
 @app.route('/messages/<int:message_id>/delete', methods=["POST"])
 def messages_destroy(message_id):
     """Delete a message."""
 
     if not g.user:
-        flash("Access unauthorized.", "danger")
+        flash("Access unauthorized", "danger")
         return redirect("/")
 
     msg = Message.query.get(message_id)
@@ -292,13 +351,19 @@ def homepage():
     """
 
     if g.user:
+        following_ids = [f.id for f in g.user.following] + [g.user.id]
         messages = (Message
                     .query
+                    .filter(Message.user_id.in_(following_ids))
                     .order_by(Message.timestamp.desc())
                     .limit(100)
                     .all())
+        # import pdb
+        # pdb.set_trace()
 
-        return render_template('home.html', messages=messages)
+        liked_msg_ids = [msg.id for msg in g.user.likes]
+
+        return render_template('home.html', messages=messages, likes=liked_msg_ids)
 
     else:
         return render_template('home-anon.html')
@@ -311,7 +376,7 @@ def homepage():
 #
 # https://stackoverflow.com/questions/34066804/disabling-caching-in-flask
 
-@app.after_request
+@ app.after_request
 def add_header(req):
     """Add non-caching headers on every request."""
 
